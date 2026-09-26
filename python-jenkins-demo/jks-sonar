@@ -14,11 +14,13 @@ pipeline {
     stages {
 
         stage('Checkout') {
+
             steps {
 
                 checkout scm
 
                 script {
+
                     env.REPO_NAME = sh(
                         script: "basename -s .git \$(git config --get remote.origin.url)",
                         returnStdout: true
@@ -29,7 +31,7 @@ pipeline {
 
                 sh '''
                     echo "Branch actual:"
-                    git branch --show-current
+                    git branch --show-current || true
 
                     echo "Commit:"
                     git rev-parse --short HEAD
@@ -39,6 +41,7 @@ pipeline {
 
 
         stage('Preparar Python') {
+
             agent {
                 docker {
                     image 'python:3.11-slim'
@@ -52,9 +55,22 @@ pipeline {
                 dir('python-jenkins-demo') {
 
                     sh '''
+                        echo "======================================"
+                        echo " Preparando entorno Python"
+                        echo "======================================"
+
                         python --version
-                        python -m pip install --upgrade pip
-                        pip install --no-cache-dir -r requirements.txt
+
+                        python -m venv .venv
+
+                        .venv/bin/python -m pip install --upgrade pip
+
+                        .venv/bin/pip install \
+                            --no-cache-dir \
+                            -r requirements.txt
+
+                        echo "Dependencias instaladas:"
+                        .venv/bin/pip list
                     '''
                 }
             }
@@ -62,6 +78,7 @@ pipeline {
 
 
         stage('Pruebas') {
+
             agent {
                 docker {
                     image 'python:3.11-slim'
@@ -75,7 +92,11 @@ pipeline {
                 dir('python-jenkins-demo') {
 
                     sh '''
-                        python -m pytest
+                        echo "======================================"
+                        echo " Ejecutando pruebas"
+                        echo "======================================"
+
+                        .venv/bin/python -m pytest
                     '''
                 }
             }
@@ -104,13 +125,12 @@ pipeline {
                                 -Dsonar.sources=. \
                                 -Dsonar.tests=tests \
                                 -Dsonar.test.inclusions=tests/**/*.py \
-                                -Dsonar.exclusions=tests/**,__pycache__/**,.pytest_cache/**
+                                -Dsonar.exclusions=tests/**,__pycache__/**,.pytest_cache/**,.venv/**
                         """
                     }
                 }
             }
         }
-
     }
 
 
