@@ -1,0 +1,118 @@
+pipeline {
+
+    agent {
+        docker {
+            image 'python:3.11-slim'
+        }
+    }
+
+    options {
+        timestamps()
+    }
+
+    stages {
+
+        stage('Environment') {
+            steps {
+                echo 'Verificando entorno de ejecución...'
+
+                sh 'python --version'
+                sh 'pip --version'
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                dir('python-jenkins-demo') {
+
+                    echo 'Instalando dependencias...'
+
+                    sh '''
+                        python -m pip install --upgrade pip
+                        pip install --no-cache-dir -r requirements.txt
+                    '''
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                dir('python-jenkins-demo') {
+
+                    echo 'Ejecutando pruebas unitarias...'
+
+                    sh '''
+                        python -m pytest tests/ \
+                            --junitxml=test-results.xml
+                    '''
+                }
+            }
+
+            post {
+                always {
+                    junit allowEmptyResults: true,
+                          testResults: 'python-jenkins-demo/test-results.xml'
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                dir('python-jenkins-demo') {
+
+                    echo 'Generando artefacto...'
+
+                    sh '''
+                        mkdir -p dist
+
+                        python -m zipfile -c \
+                            dist/python-app.zip \
+                            app.py \
+                            requirements.txt \
+                            tests
+                    '''
+
+                    sh 'ls -lh dist/'
+                }
+            }
+        }
+
+        stage('Archive') {
+            steps {
+
+                echo 'Archivando artefacto...'
+
+                archiveArtifacts(
+                    artifacts: 'python-jenkins-demo/dist/*.zip',
+                    fingerprint: true
+                )
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+
+                echo '================================='
+                echo 'Iniciando despliegue...'
+                echo 'Despliegue simulado de python-app.zip'
+                echo 'Aplicación desplegada correctamente.'
+                echo '================================='
+            }
+        }
+    }
+
+    post {
+
+        success {
+            echo 'Pipeline ejecutado correctamente.'
+        }
+
+        failure {
+            echo 'El pipeline ha fallado. Revisar Console Output.'
+        }
+
+        always {
+            echo "Build finalizado: ${env.BUILD_NUMBER}"
+        }
+    }
+}
