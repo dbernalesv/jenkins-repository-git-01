@@ -1,0 +1,140 @@
+pipeline {
+
+    agent any
+
+    options {
+        skipDefaultCheckout(true)
+    }
+
+    environment {
+        SONAR_SERVER = 'sonarqube-server'
+        SONAR_SCANNER = 'sonar-scanner'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+
+                checkout scm
+
+                script {
+                    env.REPO_NAME = sh(
+                        script: "basename -s .git \$(git config --get remote.origin.url)",
+                        returnStdout: true
+                    ).trim()
+                }
+
+                echo "Repositorio: ${env.REPO_NAME}"
+
+                sh '''
+                    echo "Branch actual:"
+                    git branch --show-current
+
+                    echo "Commit:"
+                    git rev-parse --short HEAD
+                '''
+            }
+        }
+
+
+        stage('Preparar Python') {
+            agent {
+                docker {
+                    image 'python:3.11-slim'
+                    args '-u root'
+                    reuseNode true
+                }
+            }
+
+            steps {
+
+                dir('python-jenkins-demo') {
+
+                    sh '''
+                        python --version
+                        python -m pip install --upgrade pip
+                        pip install --no-cache-dir -r requirements.txt
+                    '''
+                }
+            }
+        }
+
+
+        stage('Pruebas') {
+            agent {
+                docker {
+                    image 'python:3.11-slim'
+                    args '-u root'
+                    reuseNode true
+                }
+            }
+
+            steps {
+
+                dir('python-jenkins-demo') {
+
+                    sh '''
+                        python -m pytest
+                    '''
+                }
+            }
+        }
+
+
+        stage('SonarQube analysis') {
+
+            steps {
+
+                script {
+
+                    scannerHome = tool "${SONAR_SCANNER}"
+
+                    echo "SonarScanner instalado en: ${scannerHome}"
+                }
+
+                dir('python-jenkins-demo') {
+
+                    withSonarQubeEnv("${SONAR_SERVER}") {
+
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                                -Dsonar.projectKey=${REPO_NAME} \
+                                -Dsonar.projectName=${REPO_NAME} \
+                                -Dsonar.sources=. \
+                                -Dsonar.tests=tests \
+                                -Dsonar.test.inclusions=tests/**/*.py \
+                                -Dsonar.exclusions=tests/**,__pycache__/**,.pytest_cache/**
+                        """
+                    }
+                }
+            }
+        }
+
+    }
+
+
+    post {
+
+        success {
+
+            echo '======================================'
+            echo ' PIPELINE FINALIZADO CORRECTAMENTE'
+            echo ' Análisis SonarQube ejecutado'
+            echo '======================================'
+        }
+
+        failure {
+
+            echo '======================================'
+            echo ' PIPELINE FALLÓ'
+            echo ' Revisar pruebas o análisis SonarQube'
+            echo '======================================'
+        }
+
+        always {
+
+            echo "Repositorio analizado: ${env.REPO_NAME ?: 'N/A'}"
+        }
+    }
+}
