@@ -5,7 +5,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def hello():
-    return "Hello from Jenkins + Python!"
+    return "Hello from Jenkins + Python CI/CD!"
 
 
 if __name__ == "__main__":
