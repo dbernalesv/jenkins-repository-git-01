@@ -1,102 +1,147 @@
 pipeline {
 
-    agent {
-        docker {
-            image 'python:3.11-slim'
-        }
-    }
+    agent any
 
     options {
+        skipDefaultCheckout(true)
         timestamps()
+    }
+
+    environment {
+        SONAR_SERVER = 'sonarqube-server'
+        SONAR_SCANNER = 'sonar-scanner'
+
+        GAR_HOST = 'us-south1-docker.pkg.dev'
+        GCP_PROJECT = 'marine-service-508414-q7'
+        GAR_REPOSITORY = 'jenkins-python-images'
+        IMAGE_NAME = 'python-jenkins-demo'
+
+        IMAGE_FULL_NAME = "${GAR_HOST}/${GCP_PROJECT}/${GAR_REPOSITORY}/${IMAGE_NAME}:${BUILD_NUMBER}"
     }
 
     stages {
 
-        stage('Environment') {
+        stage('Get Source') {
             steps {
-                echo 'Verificando entorno de ejecución...'
+                checkout scm
 
-                sh 'python --version'
-                sh 'pip --version'
+                echo "Branch: ${env.BRANCH_NAME ?: 'N/A'}"
+                echo "Build: ${env.BUILD_NUMBER}"
+
+                sh '''
+                    echo "Commit:"
+                    git rev-parse --short HEAD
+                '''
             }
         }
 
-        stage('Install Dependencies') {
+        stage('Build and Sonar in Parallel') {
+
+            parallel {
+
+                stage('Build / Test') {
+
+                    agent {
+                        docker {
+                            image 'python:3.11-slim'
+                            args '-u root'
+                            reuseNode true
+                        }
+                    }
+
+                    steps {
+
+                        dir('python-jenkins-demo') {
+
+                            sh '''
+                                python --version
+
+                                python -m venv .venv
+
+                                .venv/bin/python -m pip install --upgrade pip
+
+                                .venv/bin/pip install \
+                                    --no-cache-dir \
+                                    -r requirements.txt
+
+                                .venv/bin/python -m pytest
+                            '''
+                        }
+                    }
+                }
+
+
+                stage('SonarQube') {
+
+                    steps {
+
+                        script {
+                            scannerHome = tool "${SONAR_SCANNER}"
+                        }
+
+                        dir('python-jenkins-demo') {
+
+                            withSonarQubeEnv("${SONAR_SERVER}") {
+
+                                sh """
+                                    ${scannerHome}/bin/sonar-scanner \
+                                        -Dsonar.projectKey=jenkins-repository-git-01 \
+                                        -Dsonar.projectName=jenkins-repository-git-01 \
+                                        -Dsonar.sources=. \
+                                        -Dsonar.tests=tests \
+                                        -Dsonar.test.inclusions=tests/**/*.py \
+                                        -Dsonar.exclusions=tests/**,__pycache__/**,.pytest_cache/**,.venv/**
+                                """
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+
+        stage('Docker Build') {
+
             steps {
+
                 dir('python-jenkins-demo') {
 
-                    echo 'Instalando dependencias...'
-
                     sh '''
-                        python -m pip install --upgrade pip
-                        pip install --no-cache-dir -r requirements.txt
+                        echo "Construyendo imagen:"
+                        echo "${IMAGE_FULL_NAME}"
+
+                        docker build \
+                            -t "${IMAGE_FULL_NAME}" \
+                            .
                     '''
                 }
             }
         }
 
-        stage('Test') {
-            steps {
-                dir('python-jenkins-demo') {
 
-                    echo 'Ejecutando pruebas unitarias...'
+        stage('Publish Docker Image') {
 
-                    sh '''
-                        python -m pytest tests/ \
-                            --junitxml=test-results.xml
-                    '''
-                }
-            }
-
-            post {
-                always {
-                    junit allowEmptyResults: true,
-                          testResults: 'python-jenkins-demo/test-results.xml'
-                }
-            }
-        }
-
-        stage('Build') {
-            steps {
-                dir('python-jenkins-demo') {
-
-                    echo 'Generando artefacto...'
-
-                    sh '''
-                        mkdir -p dist
-
-                        python -m zipfile -c \
-                            dist/python-app.zip \
-                            app.py \
-                            requirements.txt \
-                            tests
-                    '''
-
-                    sh 'ls -lh dist/'
-                }
-            }
-        }
-
-        stage('Archive') {
             steps {
 
-                echo 'Archivando artefacto...'
+                sh '''
+                    echo "Obteniendo token temporal desde metadata server..."
 
-                archiveArtifacts(
-                    artifacts: 'python-jenkins-demo/dist/*.zip',
-                    fingerprint: true
-                )
-            }
-        }
+                    TOKEN=$(curl -s \
+                      -H "Metadata-Flavor: Google" \
+                      http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
+                      | jq -r '.access_token')
 
-        stage('Deploy') {
-            steps {
+                    echo "$TOKEN" | docker login \
+                      -u oauth2accesstoken \
+                      --password-stdin \
+                      https://${GAR_HOST}
 
-                echo '================================='
-                echo 'Iniciando despliegue...'
-                echo 'Despliegue simulado de python-app.zip'
-                echo 'Aplicación desplegada correctamente.'
-                echo '================================='
+                    echo "Publicando imagen..."
+
+                    docker push "${IMAGE_FULL_NAME}"
+
+                    docker logout "${GAR_HOST}"
+                '''
             }
         }
     }
@@ -104,15 +149,21 @@ pipeline {
     post {
 
         success {
-            echo 'Pipeline ejecutado correctamente.'
+            echo '======================================'
+            echo ' PIPELINE FINALIZADO CORRECTAMENTE'
+            echo " Imagen publicada: ${IMAGE_FULL_NAME}"
+            echo '======================================'
         }
 
         failure {
-            echo 'El pipeline ha fallado. Revisar Console Output.'
+            echo '======================================'
+            echo ' PIPELINE FALLÓ'
+            echo ' Revisar Console Output'
+            echo '======================================'
         }
 
         always {
-            echo "Build finalizado: ${env.BUILD_NUMBER}"
+            echo "Build finalizado: ${BUILD_NUMBER}"
         }
     }
 }
