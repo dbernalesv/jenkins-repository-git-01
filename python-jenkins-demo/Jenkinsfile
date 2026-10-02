@@ -1,3 +1,5 @@
+@Library('jenkins-shared-library') _
+
 pipeline {
 
     agent any
@@ -8,32 +10,41 @@ pipeline {
     }
 
     environment {
+
+        // SonarQube
         SONAR_SERVER = 'sonarqube-server'
         SONAR_SCANNER = 'sonar-scanner'
 
+        // Google Artifact Registry
         GAR_HOST = 'us-south1-docker.pkg.dev'
         GCP_PROJECT = 'marine-service-508414-q7'
         GAR_REPOSITORY = 'jenkins-python-images'
         IMAGE_NAME = 'python-jenkins-demo'
 
+        // Imagen completa con tag dinámico = número de build
         IMAGE_FULL_NAME = "${GAR_HOST}/${GCP_PROJECT}/${GAR_REPOSITORY}/${IMAGE_NAME}:${BUILD_NUMBER}"
     }
 
     stages {
 
         stage('Get Source') {
+
             steps {
+
                 checkout scm
 
-                echo "Branch: ${env.BRANCH_NAME ?: 'N/A'}"
                 echo "Build: ${env.BUILD_NUMBER}"
 
                 sh '''
                     echo "Commit:"
                     git rev-parse --short HEAD
+
+                    echo "Branch/remoto:"
+                    git branch -a
                 '''
             }
         }
+
 
         stage('Build and Sonar in Parallel') {
 
@@ -54,6 +65,10 @@ pipeline {
                         dir('python-jenkins-demo') {
 
                             sh '''
+                                echo "======================================"
+                                echo " BUILD / TEST"
+                                echo "======================================"
+
                                 python --version
 
                                 python -m venv .venv
@@ -75,23 +90,29 @@ pipeline {
 
                     steps {
 
-                        script {
-                            scannerHome = tool "${SONAR_SCANNER}"
-                        }
-
                         dir('python-jenkins-demo') {
 
-                            withSonarQubeEnv("${SONAR_SERVER}") {
+                            script {
 
-                                sh """
-                                    ${scannerHome}/bin/sonar-scanner \
-                                        -Dsonar.projectKey=jenkins-repository-git-01 \
-                                        -Dsonar.projectName=jenkins-repository-git-01 \
-                                        -Dsonar.sources=. \
-                                        -Dsonar.tests=tests \
-                                        -Dsonar.test.inclusions=tests/**/*.py \
-                                        -Dsonar.exclusions=tests/**,__pycache__/**,.pytest_cache/**,.venv/**
-                                """
+                                def scannerHome = tool "${SONAR_SCANNER}"
+
+                                withSonarQubeEnv("${SONAR_SERVER}") {
+
+                                    sh """
+                                        echo "======================================"
+                                        echo " SONARQUBE ANALYSIS"
+                                        echo "======================================"
+
+                                        ${scannerHome}/bin/sonar-scanner \
+                                            -Dsonar.projectKey=jenkins-repository-git-01 \
+                                            -Dsonar.projectName=jenkins-repository-git-01 \
+                                            -Dsonar.sources=. \
+                                            -Dsonar.tests=tests \
+                                            -Dsonar.test.inclusions=tests/**/*.py \
+                                            -Dsonar.exclusions=tests/**,__pycache__/**,.pytest_cache/**,.venv/** \
+                                            -Dsonar.python.version=3.11
+                                    """
+                                }
                             }
                         }
                     }
@@ -107,6 +128,10 @@ pipeline {
                 dir('python-jenkins-demo') {
 
                     sh '''
+                        echo "======================================"
+                        echo " DOCKER BUILD"
+                        echo "======================================"
+
                         echo "Construyendo imagen:"
                         echo "${IMAGE_FULL_NAME}"
 
@@ -123,32 +148,26 @@ pipeline {
 
             steps {
 
+                echo '======================================'
+                echo ' PUBLISH DOCKER IMAGE'
+                echo '======================================'
+
+                garLogin("${GAR_HOST}")
+
+                garPush("${IMAGE_FULL_NAME}")
+
                 sh '''
-                    echo "Obteniendo token temporal desde metadata server..."
-
-                    TOKEN=$(curl -s \
-                      -H "Metadata-Flavor: Google" \
-                      http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
-                      | jq -r '.access_token')
-
-                    echo "$TOKEN" | docker login \
-                      -u oauth2accesstoken \
-                      --password-stdin \
-                      https://${GAR_HOST}
-
-                    echo "Publicando imagen..."
-
-                    docker push "${IMAGE_FULL_NAME}"
-
                     docker logout "${GAR_HOST}"
                 '''
             }
         }
     }
 
+
     post {
 
         success {
+
             echo '======================================'
             echo ' PIPELINE FINALIZADO CORRECTAMENTE'
             echo " Imagen publicada: ${IMAGE_FULL_NAME}"
@@ -156,6 +175,7 @@ pipeline {
         }
 
         failure {
+
             echo '======================================'
             echo ' PIPELINE FALLÓ'
             echo ' Revisar Console Output'
@@ -163,6 +183,7 @@ pipeline {
         }
 
         always {
+
             echo "Build finalizado: ${BUILD_NUMBER}"
         }
     }
