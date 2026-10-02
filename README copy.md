@@ -1,1 +1,0 @@
-# jenkins-repository-git-01
