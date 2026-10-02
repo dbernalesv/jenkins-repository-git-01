@@ -7,4 +7,4 @@ def test_home():
     response = client.get("/")
 
     assert response.status_code == 200
-    assert response.data == b"Hello from Jenkins + Python!"
+    assert response.data == b"Hello from Jenkins + Python CI/CD!"
