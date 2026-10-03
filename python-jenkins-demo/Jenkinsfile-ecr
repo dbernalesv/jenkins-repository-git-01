@@ -1,0 +1,273 @@
+pipeline {
+
+    agent any
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    environment {
+        APP_NAME = 'python-jenkins-demo'
+
+        AWS_REGION = 'us-east-2'
+
+        ECR_REPOSITORY = 'python-jenkins-demo'
+    }
+
+    stages {
+
+        stage('Get Source') {
+
+            steps {
+
+                checkout scm
+
+                sh '''
+                    echo "======================================"
+                    echo " GET SOURCE"
+                    echo "======================================"
+
+                    echo "Commit:"
+                    git rev-parse --short HEAD
+
+                    echo "Branch:"
+                    git branch -a
+                '''
+            }
+        }
+
+
+        stage('Build / Test Python') {
+
+            agent {
+                docker {
+                    image 'python:3.11-slim'
+                    args '-u root'
+                    reuseNode true
+                }
+            }
+
+            steps {
+
+                dir('python-jenkins-demo') {
+
+                    sh '''
+                        set -eux
+
+                        echo "======================================"
+                        echo " BUILD / TEST PYTHON"
+                        echo "======================================"
+
+                        python --version
+
+                        python -m venv .venv
+
+                        .venv/bin/python -m pip install --upgrade pip
+
+                        .venv/bin/pip install \
+                            --no-cache-dir \
+                            -r requirements.txt
+
+                        .venv/bin/python -m pytest
+                    '''
+                }
+            }
+        }
+
+
+        stage('Docker Build & Push a ECR') {
+
+            agent {
+                docker {
+                    image 'docker:24-cli'
+                    args '-v /var/run/docker.sock:/var/run/docker.sock -u 0:0'
+                    reuseNode true
+                }
+            }
+
+            steps {
+
+                withCredentials([
+
+                    string(
+                        credentialsId: 'aws-access-key-id',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+
+                    string(
+                        credentialsId: 'aws-secret-access-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+
+                ]) {
+
+                    dir('python-jenkins-demo') {
+
+                        sh '''
+                            set -eu
+
+                            echo "======================================"
+                            echo " DOCKER BUILD & PUSH AWS ECR"
+                            echo "======================================"
+
+                            export AWS_DEFAULT_REGION="$AWS_REGION"
+
+                            AWS_CLI_IMAGE="public.ecr.aws/aws-cli/aws-cli:2.37.5"
+
+
+                            aws_cli() {
+
+                                docker run --rm \
+                                    -e AWS_ACCESS_KEY_ID \
+                                    -e AWS_SECRET_ACCESS_KEY \
+                                    -e AWS_SESSION_TOKEN \
+                                    -e AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
+                                    "$AWS_CLI_IMAGE" "$@"
+                            }
+
+
+                            echo "Validando herramientas..."
+
+                            docker --version
+
+                            aws_cli --version
+
+
+                            AWS_ACCESS_KEY_ID=$(printf '%s' "$AWS_ACCESS_KEY_ID" | tr -d '\\r\\n')
+
+                            AWS_SECRET_ACCESS_KEY=$(printf '%s' "$AWS_SECRET_ACCESS_KEY" | tr -d '\\r\\n')
+
+
+                            echo "Validando Access Key..."
+
+                            case "$AWS_ACCESS_KEY_ID" in
+
+                                AKIA*|ASIA*)
+                                    ;;
+
+                                *)
+                                    echo "ERROR: AWS_ACCESS_KEY_ID no tiene un formato válido."
+                                    exit 1
+                                    ;;
+
+                            esac
+
+
+                            case "$AWS_SECRET_ACCESS_KEY" in
+
+                                AKIA*|ASIA*)
+                                    echo "ERROR: Las credenciales AWS parecen estar invertidas."
+                                    exit 1
+                                    ;;
+
+                            esac
+
+
+                            echo "Obteniendo AWS Account ID..."
+
+                            ACCOUNT_ID=$(aws_cli sts get-caller-identity \
+                                --query Account \
+                                --output text)
+
+
+                            ECR_REGISTRY="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+
+                            IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$BUILD_NUMBER"
+
+
+                            echo "AWS Account ID: $ACCOUNT_ID"
+
+                            echo "ECR Registry: $ECR_REGISTRY"
+
+                            echo "Repositorio ECR: $ECR_REPOSITORY"
+
+                            echo "Imagen: $IMAGE"
+
+
+                            echo "Validando repositorio ECR..."
+
+
+                            if ! aws_cli ecr describe-repositories \
+                                --repository-names "$ECR_REPOSITORY" \
+                                >/dev/null 2>&1
+                            then
+
+                                echo "Repositorio ECR no existe."
+
+                                echo "Creando repositorio $ECR_REPOSITORY..."
+
+                                aws_cli ecr create-repository \
+                                    --repository-name "$ECR_REPOSITORY"
+
+                            else
+
+                                echo "Repositorio ECR existente."
+
+                            fi
+
+
+                            echo "Autenticando Docker contra AWS ECR..."
+
+
+                            aws_cli ecr get-login-password \
+                                --region "$AWS_REGION" |
+                                docker login \
+                                    --username AWS \
+                                    --password-stdin "$ECR_REGISTRY"
+
+
+                            echo "Construyendo imagen Docker..."
+
+
+                            docker build \
+                                -t "$IMAGE" \
+                                .
+
+
+                            echo "Publicando imagen en AWS ECR..."
+
+
+                            docker push "$IMAGE"
+
+
+                            echo "======================================"
+                            echo " IMAGEN PUBLICADA CORRECTAMENTE"
+                            echo " $IMAGE"
+                            echo "======================================"
+
+                            docker logout "$ECR_REGISTRY"
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+
+    post {
+
+        success {
+
+            echo '======================================'
+            echo ' PIPELINE FINALIZADO CORRECTAMENTE'
+            echo ' Python Test + Docker + AWS ECR OK'
+            echo '======================================'
+        }
+
+
+        failure {
+
+            echo '======================================'
+            echo ' PIPELINE FALLÓ'
+            echo ' Revisar Console Output'
+            echo '======================================'
+        }
+
+
+        always {
+
+            echo "Build finalizado: ${BUILD_NUMBER}"
+        }
+    }
+}
